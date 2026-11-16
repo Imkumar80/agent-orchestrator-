@@ -111,6 +111,41 @@ func TestSessionProviderDoctorCommands(t *testing.T) {
 	}
 }
 
+func TestMemoryCommandsUseHTTPAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/v1/memories":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body["content"] != "shared fact" {
+				t.Errorf("create request=%#v", body)
+			}
+			_, _ = io.WriteString(w, `{"memory":{"id":"mem_1","scope":"global","type":"semantic","content":"shared fact","source":"user","confidence":1,"importance":3,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`)
+		case "POST /api/v1/memories/search":
+			_, _ = io.WriteString(w, `{"results":[]}`)
+		case "GET /api/v1/memories/mem_1":
+			_, _ = io.WriteString(w, `{"memory":{"id":"mem_1","scope":"global","type":"semantic","content":"shared fact","source":"user","confidence":1,"importance":3,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`)
+		case "POST /api/v1/memories/mem_1/archive":
+			_, _ = io.WriteString(w, `{"memory":{"id":"mem_1","scope":"global","type":"semantic","content":"shared fact","source":"user","confidence":1,"importance":3,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`)
+		case "DELETE /api/v1/memories/mem_1":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected memory API request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	r := Runner{Out: io.Discard, Err: io.Discard, LookupEnv: emptyEnv}
+	for _, args := range [][]string{{"memory", "create", "--content", "shared fact"}, {"memory", "get", "mem_1"}, {"memory", "search", "--query", "fact"}, {"memory", "archive", "mem_1"}, {"memory", "delete", "mem_1"}} {
+		if err := r.Run(context.Background(), append([]string{"--server", server.URL}, args...)); err != nil {
+			t.Fatalf("Run(%v): %v", args, err)
+		}
+	}
+}
+
 func TestLogsStreamsMultipleEventsAndStopsOnDisconnect(t *testing.T) {
 	streamClosed := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

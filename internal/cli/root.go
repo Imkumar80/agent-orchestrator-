@@ -70,6 +70,8 @@ func (r Runner) Run(ctx context.Context, args []string) error {
 		return r.session(ctx, apiClient, args[1:])
 	case "provider":
 		return r.provider(ctx, apiClient, args[1:])
+	case "memory":
+		return r.memory(ctx, apiClient, args[1:])
 	case "doctor":
 		return r.doctor(ctx, apiClient)
 	default:
@@ -91,6 +93,11 @@ Commands:
   session list                  List sessions
   session logs <session_id>     Stream live session events
   provider list                 Show provider availability
+  memory create                 Store a memory record
+  memory get <memory_id>        Show a memory record
+  memory search                 Search memories
+  memory archive <memory_id>    Archive a memory
+  memory delete <memory_id>     Delete a memory explicitly
   doctor                        Check server reachability
   version                       Show CLI version
 
@@ -269,6 +276,153 @@ func (r Runner) doctor(ctx context.Context, c *client.Client) error {
 	}
 	fmt.Fprintf(r.Out, "Health: %s (HTTP process liveness; provider readiness is not checked)\n", response.Status)
 	return nil
+}
+
+func (r Runner) memory(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: agent-orchestrator memory <create|get|search|archive|delete>")
+	}
+	switch args[0] {
+	case "create":
+		fs := flag.NewFlagSet("memory create", flag.ContinueOnError)
+		fs.SetOutput(r.Err)
+		scope := fs.String("scope", "global", "global, task, or session scope")
+		scopeID := fs.String("scope-id", "", "task or session ID for scoped memories")
+		kind := fs.String("type", "semantic", "working, episodic, or semantic")
+		content := fs.String("content", "", "memory content")
+		summary := fs.String("summary", "", "short summary")
+		source := fs.String("source", "user", "user, agent, tool, or system")
+		confidence := fs.Float64("confidence", 1, "confidence from 0 to 1")
+		importance := fs.Int("importance", 3, "importance from 1 to 5")
+		tags := fs.String("tags", "", "comma-separated tags")
+		metadata := fs.String("metadata", "{}", "JSON object metadata")
+		expiresIn := fs.Duration("expires-in", 0, "working memory lifetime, for example 24h")
+		jsonOutput := fs.Bool("json", false, "print JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
+		}
+		if fs.NArg() > 0 {
+			return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		}
+		if strings.TrimSpace(*content) == "" {
+			return errors.New("--content is required")
+		}
+		if !json.Valid([]byte(*metadata)) {
+			return errors.New("--metadata must be valid JSON")
+		}
+		var expiry *time.Time
+		if *expiresIn != 0 {
+			if *expiresIn < 0 {
+				return errors.New("--expires-in must be positive")
+			}
+			value := time.Now().UTC().Add(*expiresIn)
+			expiry = &value
+		}
+		request := client.MemoryCreateRequest{Scope: domain.MemoryScope(*scope), ScopeID: *scopeID, Type: domain.MemoryType(*kind), Content: *content, Summary: *summary, Source: domain.MemorySource(*source), Confidence: *confidence, Importance: *importance, Tags: splitCSV(*tags), Metadata: json.RawMessage(*metadata), ExpiresAt: expiry}
+		value, err := c.CreateMemory(ctx, request)
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return writeJSON(r.Out, value)
+		}
+		fmt.Fprintf(r.Out, "Memory stored.\n\nMemory ID  : %s\nScope      : %s\nType       : %s\nImportance : %d\n", value.ID, value.Scope, value.Type, value.Importance)
+		return nil
+	case "get":
+		if len(args) < 2 || len(args) > 3 || (len(args) == 3 && args[2] != "--json") {
+			return errors.New("usage: agent-orchestrator memory get <memory_id> [--json]")
+		}
+		value, err := c.GetMemory(ctx, domain.MemoryID(args[1]))
+		if err != nil {
+			return err
+		}
+		if len(args) == 3 {
+			return writeJSON(r.Out, value)
+		}
+		fmt.Fprintf(r.Out, "Memory: %s\n\nScope      %s %s\nType       %s\nSource     %s\nImportance %d\nConfidence %.2f\nCreated    %s\nUpdated    %s\nContent:\n%s\n", value.ID, value.Scope, value.ScopeID, value.Type, value.Source, value.Importance, value.Confidence, value.CreatedAt.Format(time.RFC3339), value.UpdatedAt.Format(time.RFC3339), value.Content)
+		return nil
+	case "search":
+		fs := flag.NewFlagSet("memory search", flag.ContinueOnError)
+		fs.SetOutput(r.Err)
+		query := fs.String("query", "", "lexical search terms")
+		scope := fs.String("scope", "", "optional scope filter")
+		scopeID := fs.String("scope-id", "", "scope identifier")
+		kind := fs.String("type", "", "optional memory type")
+		tags := fs.String("tags", "", "required tags, comma-separated")
+		minImportance := fs.Int("min-importance", 0, "minimum importance")
+		limit := fs.Int("limit", 10, "maximum results")
+		jsonOutput := fs.Bool("json", false, "print JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
+		}
+		if fs.NArg() > 0 {
+			return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		}
+		filter := domain.MemorySearchQuery{Query: *query, Scope: domain.MemoryScope(*scope), ScopeID: *scopeID, MinImportance: *minImportance, Limit: *limit, Tags: splitCSV(*tags)}
+		if *kind != "" {
+			filter.Types = []domain.MemoryType{domain.MemoryType(*kind)}
+		}
+		results, err := c.SearchMemories(ctx, filter)
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return writeJSON(r.Out, results)
+		}
+		if len(results) == 0 {
+			fmt.Fprintln(r.Out, "No matching memories.")
+			return nil
+		}
+		for _, result := range results {
+			fmt.Fprintf(r.Out, "[%d] %s (%s/%s, importance %d)\n%s\n", result.Score, result.Memory.ID, result.Memory.Scope, result.Memory.Type, result.Memory.Importance, result.Memory.Summary)
+			if result.Memory.Summary == "" {
+				fmt.Fprintln(r.Out, result.Memory.Content)
+			}
+			fmt.Fprintf(r.Out, "  Why: %s\n\n", strings.Join(result.Reasons, ", "))
+		}
+		return nil
+	case "archive":
+		if len(args) != 2 {
+			return errors.New("usage: agent-orchestrator memory archive <memory_id>")
+		}
+		value, err := c.ArchiveMemory(ctx, domain.MemoryID(args[1]))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(r.Out, "Archived memory %s.\n", value.ID)
+		return nil
+	case "delete":
+		if len(args) != 2 {
+			return errors.New("usage: agent-orchestrator memory delete <memory_id>")
+		}
+		if err := c.DeleteMemory(ctx, domain.MemoryID(args[1])); err != nil {
+			return err
+		}
+		fmt.Fprintf(r.Out, "Deleted memory %s.\n", args[1])
+		return nil
+	default:
+		return fmt.Errorf("unknown memory command %q", args[0])
+	}
+}
+
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if item := strings.TrimSpace(part); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func writeJSON(out io.Writer, value any) error {

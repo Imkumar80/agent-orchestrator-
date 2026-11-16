@@ -13,6 +13,7 @@ import (
 	"github.com/Imkumar80/agent-orchestrator-/internal/config"
 	"github.com/Imkumar80/agent-orchestrator-/internal/domain"
 	"github.com/Imkumar80/agent-orchestrator-/internal/events"
+	"github.com/Imkumar80/agent-orchestrator-/internal/memory"
 	"github.com/Imkumar80/agent-orchestrator-/internal/orchestrator"
 	"github.com/Imkumar80/agent-orchestrator-/internal/providers"
 	"github.com/Imkumar80/agent-orchestrator-/internal/providers/codex"
@@ -97,6 +98,14 @@ func Run(shutdownSignal context.Context) error {
 		_ = repository.Close()
 		return fmt.Errorf("create session manager: %w", err)
 	}
+	memoryManager, err := memory.NewManager(repository, memory.Config{Enabled: cfg.MemoryEnabled, ContextMaxBytes: cfg.MemoryContextMaxBytes})
+	if err != nil {
+		_ = broker.Shutdown()
+		stopLease()
+		_ = repository.ReleaseStartupLease(context.Background(), owner)
+		_ = repository.Close()
+		return fmt.Errorf("create memory manager: %w", err)
+	}
 	lifecycle, err := session.NewLifecycleManager(repository)
 	if err != nil {
 		_ = broker.Shutdown()
@@ -129,7 +138,7 @@ func Run(shutdownSignal context.Context) error {
 	for _, id := range recoveryReport.RecoveredSessionIDs {
 		tracked.Track(id)
 	}
-	coordinator, err := orchestrator.NewCoordinator(orchestrator.NewDeterministicPlanner(), tracked)
+	coordinator, err := orchestrator.NewCoordinatorWithMemory(orchestrator.NewDeterministicPlanner(), tracked, memoryManager)
 	if err != nil {
 		_ = broker.Shutdown()
 		stopLease()
@@ -139,6 +148,7 @@ func Run(shutdownSignal context.Context) error {
 	}
 	server, err := api.NewServer(api.Config{Address: cfg.HTTPAddress, Logger: logger}, api.Dependencies{
 		Coordinator: coordinator, Sessions: tracked, Events: broker, ExecutionContext: executionCtx, Providers: registry,
+		Memories: memoryManager,
 	})
 	if err != nil {
 		_ = broker.Shutdown()
@@ -261,6 +271,24 @@ func (s *trackedSessions) CreateAndStart(ctx context.Context, task domain.Task) 
 	defer s.active.Done()
 
 	created, err := s.manager.CreateAndStart(ctx, task)
+	if created.ID != "" {
+		s.mu.Lock()
+		s.ids[created.ID] = struct{}{}
+		s.mu.Unlock()
+	}
+	return created, err
+}
+
+func (s *trackedSessions) CreateAndStartWithContext(ctx context.Context, task domain.Task, memoryContext string) (domain.Session, error) {
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return domain.Session{}, errors.New("application is shutting down")
+	}
+	s.active.Add(1)
+	s.mu.Unlock()
+	defer s.active.Done()
+	created, err := s.manager.CreateAndStartWithContext(ctx, task, memoryContext)
 	if created.ID != "" {
 		s.mu.Lock()
 		s.ids[created.ID] = struct{}{}

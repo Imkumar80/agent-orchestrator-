@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Imkumar80/agent-orchestrator-/internal/domain"
+	"github.com/Imkumar80/agent-orchestrator-/internal/memory"
 	"github.com/Imkumar80/agent-orchestrator-/internal/ports"
 	"github.com/Imkumar80/agent-orchestrator-/internal/providers"
 	"github.com/Imkumar80/agent-orchestrator-/internal/session"
@@ -283,6 +285,117 @@ func TestCoordinatorHonorsContextCancellation(t *testing.T) {
 func TestCoordinatorRequiresSessionManager(t *testing.T) {
 	if _, err := NewCoordinator(nil, nil); !errors.Is(err, ErrInvalidDependency) {
 		t.Fatalf("NewCoordinator() error = %v, want ErrInvalidDependency", err)
+	}
+}
+
+type memoryContextBuilderFunc func(context.Context, domain.Task) (string, error)
+
+func (f memoryContextBuilderFunc) BuildTaskContext(ctx context.Context, task domain.Task) (string, error) {
+	return f(ctx, task)
+}
+
+type contextualStarter struct {
+	calls   int
+	context string
+	task    domain.Task
+}
+
+func (s *contextualStarter) CreateAndStart(_ context.Context, task domain.Task) (domain.Session, error) {
+	s.task = task
+	return domain.Session{ID: "plain"}, nil
+}
+func (s *contextualStarter) CreateAndStartWithContext(_ context.Context, task domain.Task, context string) (domain.Session, error) {
+	s.calls++
+	s.task = task
+	s.context = context
+	return domain.Session{ID: "with-memory"}, nil
+}
+
+func TestCoordinatorRetrievesAndForwardsMemoryContext(t *testing.T) {
+	task := coordinatorTask()
+	starter := &contextualStarter{}
+	builder := memoryContextBuilderFunc(func(_ context.Context, got domain.Task) (string, error) {
+		if got != task {
+			t.Fatalf("memory task=%#v", got)
+		}
+		return "reference data", nil
+	})
+	coordinator, err := NewCoordinatorWithMemory(NewDeterministicPlanner(), starter, builder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := coordinator.Execute(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != "with-memory" || starter.calls != 1 || starter.context != "reference data" || starter.task != task {
+		t.Fatalf("session=%#v starter=%#v", created, starter)
+	}
+}
+
+type memoryPortFake struct{ record domain.Memory }
+
+func (r *memoryPortFake) CreateMemory(_ context.Context, m domain.Memory) error {
+	r.record = m
+	return nil
+}
+func (r *memoryPortFake) GetMemory(_ context.Context, id domain.MemoryID) (domain.Memory, error) {
+	if r.record.ID != id {
+		return domain.Memory{}, domain.ErrMemoryNotFound
+	}
+	return r.record, nil
+}
+func (r *memoryPortFake) UpdateMemory(_ context.Context, m domain.Memory) error {
+	r.record = m
+	return nil
+}
+func (r *memoryPortFake) SearchMemories(_ context.Context, q domain.MemorySearchQuery) ([]domain.Memory, error) {
+	match := false
+	for _, term := range strings.Fields(strings.ToLower(q.Query)) {
+		if strings.Contains(strings.ToLower(r.record.Content), term) {
+			match = true
+		}
+	}
+	if r.record.ID == "" || r.record.Scope != q.Scope || !match {
+		return nil, nil
+	}
+	return []domain.Memory{r.record}, nil
+}
+func (r *memoryPortFake) ArchiveMemory(context.Context, domain.MemoryID, time.Time) error { return nil }
+func (r *memoryPortFake) DeleteMemory(context.Context, domain.MemoryID) error             { return nil }
+func (r *memoryPortFake) ExpireWorkingMemories(context.Context, time.Time) (int64, error) {
+	return 0, nil
+}
+
+func TestStoredMemoryReachesProviderThroughCoordinator(t *testing.T) {
+	task := coordinatorTask()
+	task.Description = "implement the requested feature"
+	store := &memoryPortFake{}
+	memoryManager, err := memory.NewManager(store, memory.Config{Enabled: true, ContextMaxBytes: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memoryManager.Store(context.Background(), domain.Memory{ID: "memory-architecture", Scope: domain.MemoryScopeGlobal, Type: domain.MemorySemantic, Content: "The requested feature uses a stable architecture", Source: domain.MemorySourceUser, Confidence: 1, Importance: 4, Metadata: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	agent := &coordinatorAgent{}
+	registry := providers.NewRegistry()
+	if err := registry.Register(agent); err != nil {
+		t.Fatal(err)
+	}
+	sessionManager, err := session.NewManager(newCoordinatorRepository(), registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCoordinatorWithMemory(NewDeterministicPlanner(), sessionManager, memoryManager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Execute(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	if agent.got.Task.Description != task.Description || !strings.Contains(agent.got.MemoryContext, "stable architecture") || !strings.Contains(agent.got.MemoryContext, "untrusted reference data") {
+		t.Fatalf("provider request did not receive task plus memory context: %#v", agent.got)
 	}
 }
 

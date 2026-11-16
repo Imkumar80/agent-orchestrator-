@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,24 +13,29 @@ import (
 )
 
 const (
-	EnvHTTPAddress        = "ORCHESTRATOR_HTTP_ADDR"
-	EnvDatabasePath       = "ORCHESTRATOR_SQLITE_PATH"
-	EnvEnabledProviders   = "ORCHESTRATOR_ENABLED_PROVIDERS"
-	EnvCodexExecutable    = "CODEX_EXECUTABLE"
-	EnvShutdownTimeout    = "ORCHESTRATOR_SHUTDOWN_TIMEOUT"
-	DefaultHTTPAddress    = "127.0.0.1:8080"
-	DefaultDatabasePath   = "./data/orchestrator.db"
-	DefaultEnabledAgents  = "codex"
-	DefaultShutdownWindow = 15 * time.Second
+	EnvHTTPAddress               = "ORCHESTRATOR_HTTP_ADDR"
+	EnvDatabasePath              = "ORCHESTRATOR_SQLITE_PATH"
+	EnvEnabledProviders          = "ORCHESTRATOR_ENABLED_PROVIDERS"
+	EnvCodexExecutable           = "CODEX_EXECUTABLE"
+	EnvShutdownTimeout           = "ORCHESTRATOR_SHUTDOWN_TIMEOUT"
+	EnvMemoryEnabled             = "ORCHESTRATOR_MEMORY_ENABLED"
+	EnvMemoryContextBytes        = "ORCHESTRATOR_MEMORY_CONTEXT_MAX_BYTES"
+	DefaultHTTPAddress           = "127.0.0.1:8080"
+	DefaultDatabasePath          = "./data/orchestrator.db"
+	DefaultEnabledAgents         = "codex"
+	DefaultShutdownWindow        = 15 * time.Second
+	DefaultMemoryContextMaxBytes = 4000
 )
 
 // Config contains only deployment-level application settings.
 type Config struct {
-	HTTPAddress      string
-	SQLitePath       string
-	EnabledProviders []domain.AgentProvider
-	CodexExecutable  string
-	GracefulShutdown time.Duration
+	HTTPAddress           string
+	SQLitePath            string
+	EnabledProviders      []domain.AgentProvider
+	CodexExecutable       string
+	GracefulShutdown      time.Duration
+	MemoryEnabled         bool
+	MemoryContextMaxBytes int
 }
 
 // Load reads configuration from the process environment.
@@ -51,10 +57,12 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 		return strings.TrimSpace(value)
 	}
 	config := Config{
-		HTTPAddress:      get(EnvHTTPAddress, DefaultHTTPAddress),
-		SQLitePath:       get(EnvDatabasePath, DefaultDatabasePath),
-		CodexExecutable:  get(EnvCodexExecutable, ""),
-		GracefulShutdown: DefaultShutdownWindow,
+		HTTPAddress:           get(EnvHTTPAddress, DefaultHTTPAddress),
+		SQLitePath:            get(EnvDatabasePath, DefaultDatabasePath),
+		CodexExecutable:       get(EnvCodexExecutable, ""),
+		GracefulShutdown:      DefaultShutdownWindow,
+		MemoryEnabled:         true,
+		MemoryContextMaxBytes: DefaultMemoryContextMaxBytes,
 	}
 	if config.HTTPAddress == "" {
 		return Config{}, fmt.Errorf("%s must not be empty", EnvHTTPAddress)
@@ -84,6 +92,20 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 			return Config{}, fmt.Errorf("%s must be a positive duration", EnvShutdownTimeout)
 		}
 		config.GracefulShutdown = parsed
+	}
+	if value, ok := lookup(EnvMemoryEnabled); ok {
+		enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return Config{}, fmt.Errorf("%s must be true or false", EnvMemoryEnabled)
+		}
+		config.MemoryEnabled = enabled
+	}
+	if value, ok := lookup(EnvMemoryContextBytes); ok {
+		limit, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || limit <= 0 {
+			return Config{}, fmt.Errorf("%s must be a positive integer", EnvMemoryContextBytes)
+		}
+		config.MemoryContextMaxBytes = limit
 	}
 	return config, nil
 }

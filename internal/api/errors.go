@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/Imkumar80/agent-orchestrator-/internal/domain"
+	"github.com/Imkumar80/agent-orchestrator-/internal/memory"
 	"github.com/Imkumar80/agent-orchestrator-/internal/providers"
 	"github.com/Imkumar80/agent-orchestrator-/internal/session"
 )
@@ -43,12 +44,16 @@ func mapError(err error) (int, string, string) {
 	switch {
 	case errors.Is(err, ErrRequestTooLarge):
 		return http.StatusRequestEntityTooLarge, "request_too_large", "The request body exceeds the allowed size."
-	case errors.Is(err, ErrInvalidRequest), errors.Is(err, domain.ErrInvalidTask):
+	case errors.Is(err, ErrInvalidRequest), errors.Is(err, domain.ErrInvalidTask), errors.Is(err, domain.ErrInvalidMemory):
 		return http.StatusBadRequest, "invalid_request", "The request is invalid."
 	case errors.Is(err, domain.ErrUnsupportedProvider):
 		return http.StatusUnprocessableEntity, "unsupported_provider", "The requested provider is not supported."
 	case errors.Is(err, domain.ErrSessionNotFound):
 		return http.StatusNotFound, "session_not_found", "The session was not found."
+	case errors.Is(err, domain.ErrMemoryNotFound):
+		return http.StatusNotFound, "memory_not_found", "The memory was not found."
+	case errors.Is(err, memory.ErrArchived), errors.Is(err, memory.ErrSupersession):
+		return http.StatusConflict, "memory_conflict", "The requested memory operation conflicts with its current state."
 	case errors.Is(err, providers.ErrProviderNotFound):
 		return http.StatusServiceUnavailable, "provider_unavailable", "The requested provider is not enabled."
 	case errors.Is(err, session.ErrUnsupportedCapability):

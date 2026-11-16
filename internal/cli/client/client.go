@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Imkumar80/agent-orchestrator-/internal/domain"
+	"github.com/Imkumar80/agent-orchestrator-/internal/memory"
 )
 
 const DefaultBaseURL = "http://127.0.0.1:8080"
@@ -141,6 +142,30 @@ type Event struct {
 	Payload   json.RawMessage       `json:"payload"`
 }
 
+type MemoryCreateRequest struct {
+	Scope        domain.MemoryScope  `json:"scope"`
+	ScopeID      string              `json:"scope_id,omitempty"`
+	Type         domain.MemoryType   `json:"type"`
+	Content      string              `json:"content"`
+	Summary      string              `json:"summary,omitempty"`
+	Source       domain.MemorySource `json:"source"`
+	Confidence   float64             `json:"confidence"`
+	Importance   int                 `json:"importance"`
+	Tags         []string            `json:"tags,omitempty"`
+	Metadata     json.RawMessage     `json:"metadata,omitempty"`
+	TaskID       *domain.TaskID      `json:"task_id,omitempty"`
+	SessionID    *domain.SessionID   `json:"session_id,omitempty"`
+	SupersedesID *domain.MemoryID    `json:"supersedes_id,omitempty"`
+	ExpiresAt    *time.Time          `json:"expires_at,omitempty"`
+}
+
+type MemoryResponse struct {
+	Memory domain.Memory `json:"memory"`
+}
+type MemoryResultsResponse struct {
+	Results []memory.Result `json:"results"`
+}
+
 func (c *Client) CreateTask(ctx context.Context, task domain.Task) (TaskResponse, error) {
 	var out TaskResponse
 	body := map[string]any{"task": map[string]any{"id": task.ID, "description": task.Description, "provider": task.Provider, "working_directory": task.WorkingDirectory}}
@@ -171,6 +196,35 @@ func (c *Client) Health(ctx context.Context) (HealthResponse, error) {
 	var out HealthResponse
 	err := c.request(ctx, http.MethodGet, "/health", nil, &out)
 	return out, err
+}
+
+func (c *Client) CreateMemory(ctx context.Context, request MemoryCreateRequest) (domain.Memory, error) {
+	var out MemoryResponse
+	err := c.request(ctx, http.MethodPost, "/api/v1/memories", request, &out)
+	return out.Memory, err
+}
+func (c *Client) GetMemory(ctx context.Context, id domain.MemoryID) (domain.Memory, error) {
+	var out MemoryResponse
+	err := c.request(ctx, http.MethodGet, "/api/v1/memories/"+url.PathEscape(string(id)), nil, &out)
+	return out.Memory, err
+}
+func (c *Client) UpdateMemory(ctx context.Context, id domain.MemoryID, patch map[string]any) (domain.Memory, error) {
+	var out MemoryResponse
+	err := c.request(ctx, http.MethodPatch, "/api/v1/memories/"+url.PathEscape(string(id)), patch, &out)
+	return out.Memory, err
+}
+func (c *Client) SearchMemories(ctx context.Context, query domain.MemorySearchQuery) ([]memory.Result, error) {
+	var out MemoryResultsResponse
+	err := c.request(ctx, http.MethodPost, "/api/v1/memories/search", query, &out)
+	return out.Results, err
+}
+func (c *Client) ArchiveMemory(ctx context.Context, id domain.MemoryID) (domain.Memory, error) {
+	var out MemoryResponse
+	err := c.request(ctx, http.MethodPost, "/api/v1/memories/"+url.PathEscape(string(id))+"/archive", nil, &out)
+	return out.Memory, err
+}
+func (c *Client) DeleteMemory(ctx context.Context, id domain.MemoryID) error {
+	return c.request(ctx, http.MethodDelete, "/api/v1/memories/"+url.PathEscape(string(id)), nil, nil)
 }
 
 // StreamEvents consumes the existing SSE endpoint until cancellation or disconnect.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Imkumar80/agent-orchestrator-/internal/domain"
+	"github.com/Imkumar80/agent-orchestrator-/internal/memory"
 	"github.com/Imkumar80/agent-orchestrator-/internal/ports"
 )
 
@@ -48,6 +49,15 @@ type ProviderCatalog interface {
 	Has(domain.AgentProvider) bool
 }
 
+type MemoryManager interface {
+	Store(context.Context, domain.Memory) (domain.Memory, error)
+	Get(context.Context, domain.MemoryID) (domain.Memory, error)
+	Update(context.Context, domain.Memory) (domain.Memory, error)
+	Search(context.Context, domain.MemorySearchQuery) ([]memory.Result, error)
+	Archive(context.Context, domain.MemoryID) (domain.Memory, error)
+	Delete(context.Context, domain.MemoryID) error
+}
+
 // Dependencies are provided by the application's composition root.
 type Dependencies struct {
 	Coordinator      TaskCoordinator
@@ -55,6 +65,7 @@ type Dependencies struct {
 	Events           ports.EventPublisher
 	ExecutionContext context.Context
 	Providers        ProviderCatalog
+	Memories         MemoryManager
 }
 
 // Server owns HTTP routing and timeouts but not application dependencies.

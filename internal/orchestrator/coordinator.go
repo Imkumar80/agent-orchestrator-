@@ -23,12 +23,32 @@ type SessionStarter interface {
 	CreateAndStart(ctx context.Context, task domain.Task) (domain.Session, error)
 }
 
+type ContextualSessionStarter interface {
+	CreateAndStartWithContext(ctx context.Context, task domain.Task, memoryContext string) (domain.Session, error)
+}
+
+type TaskMemoryContext interface {
+	BuildTaskContext(ctx context.Context, task domain.Task) (string, error)
+}
+
 // Coordinator validates a request and proposal, then delegates execution.
 // A nil planner disables planning and sends the requested task directly to the
 // session manager.
 type Coordinator struct {
 	planner  ports.Planner
 	sessions SessionStarter
+	memory   TaskMemoryContext
+}
+
+// NewCoordinatorWithMemory is an additive constructor; memory retrieval remains
+// optional and is owned by the injected application-level manager.
+func NewCoordinatorWithMemory(planner ports.Planner, sessions SessionStarter, memory TaskMemoryContext) (*Coordinator, error) {
+	c, err := NewCoordinator(planner, sessions)
+	if err != nil {
+		return nil, err
+	}
+	c.memory = memory
+	return c, nil
 }
 
 // NewCoordinator wires dependencies without constructing providers,
@@ -73,11 +93,29 @@ func (c *Coordinator) Execute(ctx context.Context, task domain.Task) (domain.Ses
 		}
 	}
 
-	session, err := c.sessions.CreateAndStart(ctx, task)
-	if err != nil {
-		return session, fmt.Errorf("create and start session for task %q: %w", task.ID, err)
+	var created domain.Session
+	var err error
+	if c.memory != nil {
+		memoryContext, contextErr := c.memory.BuildTaskContext(ctx, task)
+		if contextErr != nil {
+			return domain.Session{}, fmt.Errorf("retrieve task memory context: %w", contextErr)
+		}
+		if memoryContext != "" {
+			starter, ok := c.sessions.(ContextualSessionStarter)
+			if !ok {
+				return domain.Session{}, errors.New("session starter cannot forward memory context")
+			}
+			created, err = starter.CreateAndStartWithContext(ctx, task, memoryContext)
+		} else {
+			created, err = c.sessions.CreateAndStart(ctx, task)
+		}
+	} else {
+		created, err = c.sessions.CreateAndStart(ctx, task)
 	}
-	return session, nil
+	if err != nil {
+		return created, fmt.Errorf("create and start session for task %q: %w", task.ID, err)
+	}
+	return created, nil
 }
 
 func validatePlan(task domain.Task, plan ports.PlanResponse) error {

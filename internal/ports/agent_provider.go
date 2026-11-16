@@ -25,8 +25,9 @@ type AgentProvider interface {
 // StartRequest contains the canonical session identity and task for a new
 // provider execution.
 type StartRequest struct {
-	SessionID domain.SessionID `json:"session_id"`
-	Task      domain.Task      `json:"task"`
+	SessionID     domain.SessionID `json:"session_id"`
+	Task          domain.Task      `json:"task"`
+	MemoryContext string           `json:"memory_context,omitempty"`
 }
 
 // SessionRef maps the canonical orchestrator session to the provider-native

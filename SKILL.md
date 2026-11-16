@@ -2409,3 +2409,7 @@ The integration examples in this skill are architectural guidance. Treat
 provider commands, event schemas, protocol maturity, and authentication
 behavior as versioned external contracts and verify them against the
 installed release.
+
+## 16. Implemented provider-independent memory
+
+The current application includes a provider-independent memory subsystem. Memory records are validated in the domain, persisted through the existing SQLite repository, and ranked by the application memory manager using deterministic lexical search. Supported categories are working (expiry required), episodic, and semantic; supported scopes are global, task, and session. Retrieved task references are bounded, labeled as untrusted, and passed through the provider-neutral start request. Codex currently consumes this optional context; providers must not access the memory repository directly. Memory retrieval and API operations are described in `docs/memory.md`. This is implemented lexical memory, not embedding search, automatic extraction, or verification of agent claims.

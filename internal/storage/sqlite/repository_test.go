@@ -149,6 +149,10 @@ func TestMigrationsRepeatWithoutDiscardingData(t *testing.T) {
 	if err := repo.Create(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+	memory := validMemory("memory-1")
+	if err := repo.CreateMemory(context.Background(), memory); err != nil {
+		t.Fatal(err)
+	}
 	if err := applyMigrations(context.Background(), repo.db); err != nil {
 		t.Fatalf("reapply migrations: %v", err)
 	}
@@ -156,11 +160,14 @@ func TestMigrationsRepeatWithoutDiscardingData(t *testing.T) {
 	if err := repo.db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 2 {
-		t.Fatalf("migration count = %d, want 2", count)
+	if count != 3 {
+		t.Fatalf("migration count = %d, want 3", count)
 	}
 	if _, err := repo.Get(context.Background(), session.ID); err != nil {
 		t.Fatalf("session lost after reapplying migrations: %v", err)
+	}
+	if _, err := repo.GetMemory(context.Background(), memory.ID); err != nil {
+		t.Fatalf("memory lost after reapplying migrations: %v", err)
 	}
 	if err := repo.Close(); err != nil {
 		t.Fatal(err)
@@ -172,6 +179,69 @@ func TestMigrationsRepeatWithoutDiscardingData(t *testing.T) {
 	defer reopened.Close()
 	if _, err := reopened.Get(context.Background(), session.ID); err != nil {
 		t.Fatalf("session lost after reopen: %v", err)
+	}
+	if _, err := reopened.GetMemory(context.Background(), memory.ID); err != nil {
+		t.Fatalf("memory lost after reopen: %v", err)
+	}
+}
+
+func TestMemoryRepositoryRoundTripSearchAndLifecycle(t *testing.T) {
+	repo := openTestRepository(t, filepath.Join(t.TempDir(), "memories.db"))
+	ctx := context.Background()
+	m := validMemory("memory-1")
+	m.Tags = []string{"database", "go"}
+	m.Metadata = []byte(`{"reviewed":true}`)
+	if err := repo.CreateMemory(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.GetMemory(ctx, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != m.Content || got.Scope != m.Scope || got.Type != m.Type || got.Source != m.Source || got.Importance != m.Importance || !got.CreatedAt.Equal(m.CreatedAt) || len(got.Tags) != 2 || string(got.Metadata) != string(m.Metadata) {
+		t.Fatalf("memory round trip = %#v", got)
+	}
+	items, err := repo.SearchMemories(ctx, domain.MemorySearchQuery{Query: "sqlite", Scope: domain.MemoryScopeGlobal, Tags: []string{"database"}, Limit: 10})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("memory search = %d, %v", len(items), err)
+	}
+	got.Content = "Updated SQLite storage notes"
+	got.UpdatedAt = got.UpdatedAt.Add(time.Second)
+	if err := repo.UpdateMemory(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetMemory(ctx, "missing"); !errors.Is(err, domain.ErrMemoryNotFound) {
+		t.Fatalf("missing memory error = %v", err)
+	}
+	if err := repo.ArchiveMemory(ctx, m.ID, got.UpdatedAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	items, err = repo.SearchMemories(ctx, domain.MemorySearchQuery{Limit: 10})
+	if err != nil || len(items) != 0 {
+		t.Fatalf("archived memory search = %d, %v", len(items), err)
+	}
+	if err := repo.DeleteMemory(ctx, m.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMemoryRepositoryExpiresWorkingRecords(t *testing.T) {
+	repo := openTestRepository(t, filepath.Join(t.TempDir(), "expiry.db"))
+	now := time.Now().UTC()
+	expires := now.Add(time.Second)
+	m := validMemory("working-1")
+	m.Type = domain.MemoryWorking
+	m.ExpiresAt = &expires
+	if err := repo.CreateMemory(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	count, err := repo.ExpireWorkingMemories(context.Background(), expires)
+	if err != nil || count != 1 {
+		t.Fatalf("expire = %d, %v", count, err)
+	}
+	got, err := repo.GetMemory(context.Background(), m.ID)
+	if err != nil || got.ArchivedAt == nil {
+		t.Fatalf("expired memory = %#v, %v", got, err)
 	}
 }
 
@@ -239,4 +309,9 @@ func validSession() domain.Session {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+}
+
+func validMemory(id domain.MemoryID) domain.Memory {
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	return domain.Memory{ID: id, Scope: domain.MemoryScopeGlobal, Type: domain.MemorySemantic, Content: "SQLite repository architecture", Summary: "SQLite repository", Source: domain.MemorySourceUser, Confidence: 1, Importance: 3, Metadata: []byte(`{}`), CreatedAt: now, UpdatedAt: now}
 }

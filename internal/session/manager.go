@@ -82,17 +82,28 @@ func (m *Manager) Create(ctx context.Context, task domain.Task) (domain.Session,
 // CreateAndStart creates a durable session before starting its provider.
 // On provider failure it returns the persisted failed session with the cause.
 func (m *Manager) CreateAndStart(ctx context.Context, task domain.Task) (domain.Session, error) {
+	return m.CreateAndStartWithContext(ctx, task, "")
+}
+
+// CreateAndStartWithContext passes optional provider-neutral reference context
+// through the existing provider request without changing the user task.
+func (m *Manager) CreateAndStartWithContext(ctx context.Context, task domain.Task, memoryContext string) (domain.Session, error) {
 	session, err := m.Create(ctx, task)
 	if err != nil {
 		return domain.Session{}, err
 	}
-	return m.Start(ctx, session.ID, task)
+	return m.StartWithContext(ctx, session.ID, task, memoryContext)
 }
 
 // Start starts a pending session. The task is supplied because the repository
 // stores sessions only; its ID and provider must match the persisted session.
 // Repeated calls for an already running or waiting session are harmless.
 func (m *Manager) Start(ctx context.Context, id domain.SessionID, task domain.Task) (domain.Session, error) {
+	return m.StartWithContext(ctx, id, task, "")
+}
+
+// StartWithContext starts a session with optional provider-neutral memory references.
+func (m *Manager) StartWithContext(ctx context.Context, id domain.SessionID, task domain.Task, memoryContext string) (domain.Session, error) {
 	if m == nil || m.repository == nil || m.registry == nil {
 		return domain.Session{}, ErrInvalidDependency
 	}
@@ -130,7 +141,7 @@ func (m *Manager) Start(ctx context.Context, id domain.SessionID, task domain.Ta
 			fmt.Sprintf("provider %q is unavailable", starting.Provider))
 	}
 
-	ref, startErr := provider.Start(ctx, ports.StartRequest{SessionID: starting.ID, Task: task})
+	ref, startErr := provider.Start(ctx, ports.StartRequest{SessionID: starting.ID, Task: task, MemoryContext: memoryContext})
 	if startErr != nil {
 		cleanupRef := ports.SessionRef{
 			SessionID:               starting.ID,

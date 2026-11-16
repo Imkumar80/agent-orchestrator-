@@ -24,6 +24,7 @@ type Handler struct {
 	events          ports.EventPublisher
 	execContext     context.Context
 	providerCatalog ProviderCatalog
+	memories        MemoryManager
 	logger          *slog.Logger
 }
 
@@ -35,6 +36,7 @@ func newHandler(maxBodyBytes int64, dependencies Dependencies, logger *slog.Logg
 		events:          dependencies.Events,
 		execContext:     dependencies.ExecutionContext,
 		providerCatalog: dependencies.Providers,
+		memories:        dependencies.Memories,
 		logger:          logger,
 	}
 }
@@ -46,6 +48,12 @@ func (h *Handler) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/sessions/{session_id}", h.getSession)
 	mux.HandleFunc("GET /api/v1/sessions", h.listSessions)
 	mux.HandleFunc("GET /api/v1/providers", h.listProviders)
+	mux.HandleFunc("POST /api/v1/memories", h.createMemory)
+	mux.HandleFunc("GET /api/v1/memories/{memory_id}", h.getMemory)
+	mux.HandleFunc("POST /api/v1/memories/search", h.searchMemories)
+	mux.HandleFunc("PATCH /api/v1/memories/{memory_id}", h.updateMemory)
+	mux.HandleFunc("POST /api/v1/memories/{memory_id}/archive", h.archiveMemory)
+	mux.HandleFunc("DELETE /api/v1/memories/{memory_id}", h.deleteMemory)
 	mux.HandleFunc("POST /api/v1/sessions/{session_id}/cancel", h.cancelSession)
 	mux.HandleFunc("GET /api/v1/sessions/{session_id}/events", h.streamEvents)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

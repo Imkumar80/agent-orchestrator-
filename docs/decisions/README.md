@@ -16,6 +16,7 @@ or `SKILL.md`, which remains the primary architectural specification.
 | [0004](0004-use-optional-deterministic-planning-for-single-task-coordination.md) | Use optional deterministic planning for single-task coordination | Accepted |
 | [0005](0005-use-bounded-in-memory-session-event-broadcasting.md) | Use bounded in-memory session event broadcasting | Accepted |
 | [0006](0006-keep-the-cli-on-the-http-api.md) | Keep the CLI on the HTTP API | Accepted |
+| [0007](0007-use-provider-independent-sqlite-memory.md) | Use provider-independent SQLite memory | Accepted |
 
 ## When to write an ADR
 
