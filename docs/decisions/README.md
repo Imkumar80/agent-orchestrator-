@@ -13,6 +13,7 @@ or `SKILL.md`, which remains the primary architectural specification.
 | [0001](0001-use-go-as-provider-neutral-control-plane.md) | Use Go as the provider-neutral orchestration control plane | Accepted |
 | [0002](0002-persist-session-facts-and-derive-status.md) | Persist session facts and derive display status | Accepted |
 | [0003](0003-build-a-local-first-single-daemon-mvp.md) | Build the local-first MVP around one supervised daemon | Accepted |
+| [0004](0004-use-optional-deterministic-planning-for-single-task-coordination.md) | Use optional deterministic planning for single-task coordination | Accepted |
 
 ## When to write an ADR
 
