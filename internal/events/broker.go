@@ -39,6 +39,7 @@ type Broker struct {
 }
 
 var _ ports.EventPublisher = (*Broker)(nil)
+var _ ports.DetailedEventPublisher = (*Broker)(nil)
 
 // NewBroker returns an in-memory event broker with bounded subscriber queues.
 func NewBroker(config Config) (*Broker, error) {
@@ -101,6 +102,12 @@ func (b *Broker) Subscribe(ctx context.Context, sessionID domain.SessionID) (<-c
 		return nil, err
 	}
 	return sub.Events(), nil
+}
+
+// SubscribeStream exposes a port-level subscription handle with termination
+// diagnostics while preserving the existing EventPublisher contract.
+func (b *Broker) SubscribeStream(ctx context.Context, sessionID domain.SessionID) (ports.EventSubscription, error) {
+	return b.SubscribeDetailed(ctx, sessionID)
 }
 
 // SubscribeDetailed registers an independently buffered session subscription.

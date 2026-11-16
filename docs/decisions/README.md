@@ -15,6 +15,7 @@ or `SKILL.md`, which remains the primary architectural specification.
 | [0003](0003-build-a-local-first-single-daemon-mvp.md) | Build the local-first MVP around one supervised daemon | Accepted |
 | [0004](0004-use-optional-deterministic-planning-for-single-task-coordination.md) | Use optional deterministic planning for single-task coordination | Accepted |
 | [0005](0005-use-bounded-in-memory-session-event-broadcasting.md) | Use bounded in-memory session event broadcasting | Accepted |
+| [0006](0006-keep-the-cli-on-the-http-api.md) | Keep the CLI on the HTTP API | Accepted |
 
 ## When to write an ADR
 

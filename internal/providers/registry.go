@@ -66,3 +66,14 @@ func (r *Registry) Get(name domain.AgentProvider) (ports.AgentProvider, error) {
 	}
 	return provider, nil
 }
+
+// Has reports whether name is registered for execution.
+func (r *Registry) Has(name domain.AgentProvider) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	_, exists := r.providers[name]
+	r.mu.RUnlock()
+	return exists
+}

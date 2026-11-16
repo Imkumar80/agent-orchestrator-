@@ -187,6 +187,23 @@ func (m *Manager) Get(ctx context.Context, id domain.SessionID) (domain.Session,
 	return m.get(ctx, id)
 }
 
+// List returns persisted session snapshots when the configured repository
+// provides the optional listing capability.
+func (m *Manager) List(ctx context.Context) ([]domain.Session, error) {
+	if m == nil || m.repository == nil {
+		return nil, ErrInvalidDependency
+	}
+	lister, ok := m.repository.(ports.SessionLister)
+	if !ok {
+		return nil, errors.New("session repository does not support listing")
+	}
+	items, err := lister.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	return items, nil
+}
+
 // Interrupt interrupts an active provider session and persists its terminal state.
 // Repeated interruption of an already interrupted session is a no-op.
 func (m *Manager) Interrupt(ctx context.Context, id domain.SessionID) (domain.Session, error) {
