@@ -108,7 +108,7 @@ The local API currently provides:
 | `POST` | `/api/v1/tasks` | Create and start a task. |
 | `GET` | `/api/v1/sessions` | List sessions. |
 | `GET` | `/api/v1/sessions/{session_id}` | Read a session snapshot. |
-| `POST` | `/api/v1/sessions/{session_id}/cancel` | Cancel a session. |
+| `POST` | `/api/v1/sessions/{session_id}/cancel` | `accepted` means the orchestrator durably recorded cancellation intent. `provider_acknowledged` is nullable; `provider_acknowledgment_status` distinguishes acknowledged, timed out, and unknown. Provider rejection is an API error. Use `session.status` to determine whether execution terminated; asynchronous providers may remain `cancelling`. |
 | `GET` | `/api/v1/sessions/{session_id}/events` | Subscribe to live session events using SSE. |
 | `GET` | `/api/v1/providers` | List recognized providers and availability. |
 | `GET`, `POST` | `/api/v1/memories` | Search and create memories. |
@@ -128,6 +128,43 @@ curl -X POST http://127.0.0.1:8080/api/v1/tasks \
 Memories are stored in SQLite and are independent of the agent provider. They can be global, task-scoped, or session-scoped, and working, episodic, or semantic. Search uses deterministic lexical matching; it does not use embeddings or a vector database. Expired working memories are excluded from search. Retrieved memories are supplied as untrusted reference context, separate from task instructions.
 
 See [`docs/memory.md`](docs/memory.md) for memory commands, scopes, and API examples.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    U["User / Developer"] --> CLI["CLI / Terminal Dashboard"]
+    U --> HTTP["HTTP API Client"]
+
+    CLI --> HTTP
+    HTTP --> API["HTTP API + SSE"]
+
+    API --> CO["Coordinator"]
+    CO --> PL["Planner"]
+    CO --> MEM["Memory Manager"]
+    CO --> SM["Session Manager"]
+
+    MEM --> DB[("SQLite")]
+    SM --> REG["Provider Registry"]
+    SM --> DB
+
+    REG --> CODEX["Codex Provider Adapter"]
+    CODEX --> PROC["Codex CLI Process"]
+    CODEX --> EB["Event Broker"]
+
+    EB --> API
+    API --> SSE["Server-Sent Events"]
+
+    DB --> REC["Recovery Service"]
+    REC --> SM
+
+    APP["Application Composition Root"] -. wires dependencies .-> API
+    APP -. wires dependencies .-> CO
+    APP -. wires dependencies .-> SM
+    APP -. initializes .-> REG
+    APP -. initializes .-> DB
+    APP -. initializes .-> EB
+```
 
 ## Project layout
 
