@@ -20,8 +20,9 @@ func TestSSEHeadersAndMultipleEvents(t *testing.T) {
 	handler, _, sessions, publisher := newTestHandler(t)
 	sessions.values["ses-stream"] = validSession("ses-stream", domain.SessionRunning)
 	publisher.stream.events <- streamTestEvent("evt-1", "provider.output", json.RawMessage(`{"stream":"stdout"}`))
-	publisher.stream.events <- streamTestEvent("evt-2", "process.completed", json.RawMessage(`{"status":"completed"}`))
-	publisher.stream.finish(nil)
+	terminal := streamTestEvent("evt-2", "process.completed", json.RawMessage(`{"status":"completed"}`))
+	terminal.Terminal = true
+	publisher.stream.events <- terminal
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/ses-stream/events", nil))

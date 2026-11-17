@@ -19,13 +19,16 @@ func configureProcessTree(cmd *exec.Cmd) {
 		}
 		killer := exec.Command("taskkill.exe", "/PID", strconv.Itoa(cmd.Process.Pid), "/T", "/F")
 		if output, err := killer.CombinedOutput(); err != nil {
+			treeErr := fmt.Errorf("taskkill Codex process tree: %w: %s", err, output)
 			killErr := cmd.Process.Kill()
 			if errors.Is(killErr, os.ErrProcessDone) {
-				return nil
+				return treeErr
 			}
 			if killErr != nil {
-				return errors.Join(fmt.Errorf("taskkill Codex process tree: %w: %s", err, output), killErr)
+				return errors.Join(treeErr, killErr)
 			}
+			// Killing the parent process does not prove its descendants exited.
+			return treeErr
 		}
 		return nil
 	}

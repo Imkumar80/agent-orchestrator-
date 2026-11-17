@@ -1,5 +1,6 @@
 # Provider-independent memory
 
+
 ## Architecture
 
 The orchestrator owns memory. The HTTP API and CLI call the application memory manager; the manager validates records, retrieves relevant references, and delegates persistence to the `MemoryRepository` port. SQLite implements that port on the same connection and migration lifecycle as session storage. Providers receive optional reference text only through the provider-neutral `StartRequest.MemoryContext` field. Provider adapters do not read or write the memory repository.

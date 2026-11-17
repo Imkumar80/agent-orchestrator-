@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -56,29 +57,32 @@ type Config struct {
 
 // Provider runs one non-interactive Codex CLI execution per orchestrator session.
 type Provider struct {
-	config  Config
-	command func(context.Context, string, ...string) *exec.Cmd
-	mu      sync.RWMutex
-	runs    map[domain.SessionID]*processRun
+	config                  Config
+	command                 func(context.Context, string, ...string) *exec.Cmd
+	commandArgs             []string
+	processTreeConfigurator func(*exec.Cmd)
+	mu                      sync.RWMutex
+	runs                    map[domain.SessionID]*processRun
 }
 
 type processRun struct {
-	ref        ports.SessionRef
-	cmd        *exec.Cmd
-	cancel     context.CancelFunc
-	done       chan struct{}
-	started    chan struct{}
-	startOnce  sync.Once
-	mu         sync.Mutex
-	finished   bool
-	stopping   bool
-	resultErr  error
-	publishErr error
-	threadID   string
-	lastEvent  time.Time
-	events     []domain.AgentEvent
-	subs       map[uint64]chan domain.AgentEvent
-	nextSub    uint64
+	ref                ports.SessionRef
+	cmd                *exec.Cmd
+	cancel             context.CancelFunc
+	done               chan struct{}
+	started            chan struct{}
+	startOnce          sync.Once
+	mu                 sync.Mutex
+	finished           bool
+	stopping           bool
+	resultErr          error
+	publishErr         error
+	threadID           string
+	initialEventStatus string
+	lastEvent          time.Time
+	events             []domain.AgentEvent
+	subs               map[uint64]chan domain.AgentEvent
+	nextSub            uint64
 }
 
 // ProcessError records a non-zero Codex process exit while preserving errors.Is.
@@ -112,26 +116,9 @@ func NewProvider(config Config) (*Provider, error) {
 		return nil, errors.New("Codex model must not contain leading or trailing whitespace")
 	}
 
-	executable := config.ExecutablePath
-	if executable == "" {
-		var err error
-		executable, err = exec.LookPath("codex")
-		if err != nil {
-			return nil, fmt.Errorf("locate Codex CLI: %w", err)
-		}
-	} else {
-		resolved, err := exec.LookPath(executable)
-		if err != nil {
-			return nil, fmt.Errorf("validate Codex CLI executable %q: %w", executable, err)
-		}
-		executable = resolved
-	}
-	info, err := os.Stat(executable)
+	executable, commandArgs, err := resolveExecutable(config.ExecutablePath)
 	if err != nil {
-		return nil, fmt.Errorf("inspect Codex CLI executable %q: %w", executable, err)
-	}
-	if info.IsDir() || !isExecutable(info) {
-		return nil, fmt.Errorf("Codex CLI path %q is not an executable file", executable)
+		return nil, err
 	}
 	config.ExecutablePath = executable
 	if config.EventBuffer <= 0 {
@@ -141,12 +128,67 @@ func NewProvider(config Config) (*Provider, error) {
 		config.StartupTimeout = defaultStartTimeout
 	}
 	return &Provider{
-		config: config,
+		config:                  config,
+		commandArgs:             commandArgs,
+		processTreeConfigurator: configureProcessTree,
 		command: func(ctx context.Context, executable string, args ...string) *exec.Cmd {
 			return exec.CommandContext(ctx, executable, args...)
 		},
 		runs: make(map[domain.SessionID]*processRun),
 	}, nil
+}
+
+// resolveExecutable launches Windows npm's Codex .cmd shim without invoking
+// cmd.exe. Npm places the package entry point beside the shim under
+// node_modules, so Node can execute it directly with safely separated args.
+func resolveExecutable(configured string) (string, []string, error) {
+	name := configured
+	if name == "" {
+		name = "codex"
+	}
+	executable, err := exec.LookPath(name)
+	if err != nil {
+		if configured == "" {
+			return "", nil, fmt.Errorf("locate Codex CLI: %w", err)
+		}
+		return "", nil, fmt.Errorf("validate Codex CLI executable %q: %w", configured, err)
+	}
+	info, err := os.Stat(executable)
+	if err != nil {
+		return "", nil, fmt.Errorf("inspect Codex CLI executable %q: %w", executable, err)
+	}
+	if info.IsDir() {
+		return "", nil, fmt.Errorf("Codex CLI path %q is not an executable file", executable)
+	}
+	if runtime.GOOS == "windows" && strings.EqualFold(filepath.Ext(executable), ".cmd") {
+		entrypoint := filepath.Join(filepath.Dir(executable), "node_modules", "@openai", "codex", "bin", "codex.js")
+		entryInfo, statErr := os.Stat(entrypoint)
+		if statErr != nil || entryInfo.IsDir() {
+			if statErr == nil {
+				statErr = errors.New("path is a directory")
+			}
+			return "", nil, fmt.Errorf("resolve Codex npm shim %q entry point %q: %w", executable, entrypoint, statErr)
+		}
+		node := filepath.Join(filepath.Dir(executable), "node.exe")
+		if nodeInfo, nodeErr := os.Stat(node); nodeErr != nil || nodeInfo.IsDir() {
+			node, nodeErr = exec.LookPath("node")
+			if nodeErr != nil {
+				return "", nil, fmt.Errorf("resolve Node.js for Codex npm shim: %w", nodeErr)
+			}
+		}
+		nodeInfo, err := os.Stat(node)
+		if err != nil {
+			return "", nil, fmt.Errorf("inspect Node.js executable %q: %w", node, err)
+		}
+		if nodeInfo.IsDir() || !isExecutable(nodeInfo) {
+			return "", nil, fmt.Errorf("Node.js path %q is not an executable file", node)
+		}
+		return node, []string{entrypoint}, nil
+	}
+	if !isExecutable(info) {
+		return "", nil, fmt.Errorf("Codex CLI path %q is not an executable file", executable)
+	}
+	return executable, nil, nil
 }
 
 func validSandbox(value string) bool {
@@ -206,14 +248,17 @@ func (p *Provider) Start(ctx context.Context, request ports.StartRequest) (ports
 		return ports.SessionRef{}, fmt.Errorf("Codex provider cannot run task for provider %q", request.Task.Provider)
 	}
 	if !filepath.IsAbs(request.Task.WorkingDirectory) {
-		return ports.SessionRef{}, errors.New("Codex working directory must be absolute")
+		cause := errors.New("Codex working directory must be absolute")
+		return ports.SessionRef{}, startupDiagnostic("validate_working_directory", "working_directory_validation_failed", false, false, nil, "", cause)
 	}
 	info, err := os.Stat(request.Task.WorkingDirectory)
 	if err != nil {
-		return ports.SessionRef{}, fmt.Errorf("inspect Codex working directory: %w", err)
+		cause := fmt.Errorf("inspect Codex working directory: %w", err)
+		return ports.SessionRef{}, startupDiagnostic("validate_working_directory", "working_directory_validation_failed", false, false, nil, safeOSErrorSummary(err), cause)
 	}
 	if !info.IsDir() {
-		return ports.SessionRef{}, fmt.Errorf("Codex working directory %q is not a directory", request.Task.WorkingDirectory)
+		cause := fmt.Errorf("Codex working directory %q is not a directory", request.Task.WorkingDirectory)
+		return ports.SessionRef{}, startupDiagnostic("validate_working_directory", "working_directory_validation_failed", false, false, nil, "", cause)
 	}
 	if p.config.ExecutablePath == "" {
 		return ports.SessionRef{}, errors.New("Codex executable was not resolved")
@@ -242,7 +287,8 @@ func (p *Provider) Start(ctx context.Context, request ports.StartRequest) (ports
 		}
 		p.mu.Unlock()
 	}
-	args := []string{"exec", "--json", "--cd", request.Task.WorkingDirectory, "--sandbox", p.config.Sandbox, "--ask-for-approval", p.config.ApprovalPolicy}
+	args := append([]string(nil), p.commandArgs...)
+	args = append(args, "exec", "--json", "--cd", request.Task.WorkingDirectory, "--sandbox", p.config.Sandbox, "--config", fmt.Sprintf("approval_policy=%q", p.config.ApprovalPolicy))
 	if p.config.Model != "" {
 		args = append(args, "--model", p.config.Model)
 	}
@@ -250,20 +296,30 @@ func (p *Provider) Start(ctx context.Context, request ports.StartRequest) (ports
 	cmd := p.command(runCtx, p.config.ExecutablePath, args...)
 	cmd.Dir = request.Task.WorkingDirectory
 	cmd.Stdin = strings.NewReader(executionPrompt(request.Task.Description, request.MemoryContext))
-	configureProcessTree(cmd)
+	configureTree := p.processTreeConfigurator
+	if configureTree == nil {
+		configureTree = configureProcessTree
+	}
+	configureTree(cmd)
+	reportProcessCancelErrors(cmd, func(cancelErr error) {
+		p.addRunError(run, fmt.Errorf("cancel Codex process tree: %w", cancelErr))
+	})
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		rollback()
-		return ports.SessionRef{}, fmt.Errorf("create Codex stdout pipe: %w", err)
+		cause := fmt.Errorf("create Codex stdout pipe: %w", err)
+		return ports.SessionRef{}, startupDiagnostic("stdout_pipe", "stdout_pipe_setup_failed", false, false, nil, safeOSErrorSummary(err), cause)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		rollback()
-		return ports.SessionRef{}, fmt.Errorf("create Codex stderr pipe: %w", err)
+		cause := fmt.Errorf("create Codex stderr pipe: %w", err)
+		return ports.SessionRef{}, startupDiagnostic("stderr_pipe", "stderr_pipe_setup_failed", false, false, nil, safeOSErrorSummary(err), cause)
 	}
 	if err := cmd.Start(); err != nil {
 		rollback()
-		return ports.SessionRef{}, fmt.Errorf("start Codex CLI: %w", err)
+		cause := fmt.Errorf("start Codex CLI: %w", err)
+		return ports.SessionRef{}, startupDiagnostic("process_start", "process_creation_failed", false, false, nil, safeOSErrorSummary(err), cause)
 	}
 	run.cmd = cmd
 
@@ -293,27 +349,95 @@ func (p *Provider) Start(ctx context.Context, request ports.StartRequest) (ports
 		}
 		run.mu.Lock()
 		resultErr = run.resultErr
-		if resultErr == nil && run.cmd.ProcessState != nil {
-			if waitErr := run.cmd.ProcessState.ExitCode(); waitErr != 0 {
-				resultErr = &ProcessError{ExitCode: waitErr, Cause: fmt.Errorf("Codex exited with status %d before startup", waitErr)}
-			}
-		}
+		exitCode := processExitCode(run.cmd)
+		initialEventStatus := run.initialEventStatus
 		run.mu.Unlock()
+		if resultErr == nil && exitCode != nil && *exitCode != 0 {
+			resultErr = &ProcessError{ExitCode: *exitCode, Cause: fmt.Errorf("Codex exited with status %d before startup", *exitCode)}
+		}
 		p.removeRun(request.SessionID, run)
 		if resultErr == nil {
 			resultErr = errors.New("Codex process exited before reporting a thread ID")
 		}
-		return ports.SessionRef{}, fmt.Errorf("Codex session startup failed: %w", resultErr)
+		category := "process_exited_before_thread_started"
+		if initialEventStatus == "malformed_json" || initialEventStatus == "thread_started_missing_id" {
+			category = "invalid_initial_event"
+		} else if (initialEventStatus == "" || initialEventStatus == "missing") && exitCode != nil && *exitCode == 0 {
+			category = "missing_initial_event"
+		}
+		cause := fmt.Errorf("Codex session startup failed: %w", resultErr)
+		return ports.SessionRef{}, startupDiagnostic("await_thread_started", category, true, false, exitCode, "", cause)
 	case <-timer.C:
+		run.mu.Lock()
+		threadStarted := run.threadID != ""
+		run.mu.Unlock()
 		cancel()
-		_ = waitForRun(context.Background(), run)
+		cleanupErr := waitForRun(context.Background(), run)
 		p.removeRun(request.SessionID, run)
-		return ports.SessionRef{}, fmt.Errorf("Codex session startup timed out after %s", p.config.StartupTimeout)
+		cause := errors.Join(
+			fmt.Errorf("Codex session startup timed out after %s", p.config.StartupTimeout),
+			wrapCleanupError("clean up Codex process after startup timeout", cleanupErr),
+		)
+		return ports.SessionRef{}, startupDiagnostic("await_thread_started", "startup_timeout", true, threadStarted, processExitCode(run.cmd), "", cause)
 	case <-ctx.Done():
+		run.mu.Lock()
+		threadStarted := run.threadID != ""
+		run.mu.Unlock()
 		cancel()
-		_ = waitForRun(context.Background(), run)
+		cleanupErr := waitForRun(context.Background(), run)
 		p.removeRun(request.SessionID, run)
-		return ports.SessionRef{}, ctx.Err()
+		cause := errors.Join(ctx.Err(), wrapCleanupError("clean up Codex process after startup cancellation", cleanupErr))
+		return ports.SessionRef{}, startupDiagnostic("await_thread_started", "startup_cancelled", true, threadStarted, processExitCode(run.cmd), "", cause)
+	}
+}
+
+func startupDiagnostic(stage, category string, processCreated, threadStarted bool, exitCode *int, osErrorSummary string, cause error) error {
+	return &ports.ProviderStartupError{
+		Stage: stage, Category: category, ProcessCreated: processCreated, ThreadStarted: threadStarted,
+		ExitCode: exitCode, OSErrorSummary: osErrorSummary, Cause: cause,
+	}
+}
+
+func processExitCode(cmd *exec.Cmd) *int {
+	if cmd == nil || cmd.ProcessState == nil {
+		return nil
+	}
+	code := cmd.ProcessState.ExitCode()
+	return &code
+}
+
+// safeOSErrorSummary omits the executable path embedded in os.PathError and
+// reports only the underlying operating-system error text.
+func safeOSErrorSummary(err error) string {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) && pathErr.Err != nil {
+		return pathErr.Err.Error()
+	}
+	var syscallErr *os.SyscallError
+	if errors.As(err, &syscallErr) && syscallErr.Err != nil {
+		return syscallErr.Err.Error()
+	}
+	return "process startup operation failed"
+}
+
+func wrapCleanupError(message string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", message, err)
+}
+
+func reportProcessCancelErrors(cmd *exec.Cmd, report func(error)) {
+	processCancel := cmd.Cancel
+	if processCancel == nil {
+		return
+	}
+	cmd.Cancel = func() error {
+		cancelErr := processCancel()
+		if cancelErr != nil && !errors.Is(cancelErr, os.ErrProcessDone) && report != nil {
+			report(cancelErr)
+		}
+		return cancelErr
 	}
 }
 
@@ -323,9 +447,11 @@ func (p *Provider) readOutput(run *processRun, reader io.Reader, stream string) 
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
 		var value any
+		if stream == "stdout" {
+			p.observeProtocolStart(run, line)
+		}
 		if stream == "stdout" && json.Valid(line) {
 			value = json.RawMessage(line)
-			p.observeProtocolStart(run, line)
 		} else {
 			value = string(line)
 		}
@@ -347,10 +473,24 @@ func (p *Provider) observeProtocolStart(run *processRun, line []byte) {
 		Type     string `json:"type"`
 		ThreadID string `json:"thread_id"`
 	}
-	if err := json.Unmarshal(line, &event); err != nil || event.Type != "thread.started" || event.ThreadID == "" {
+	err := json.Unmarshal(line, &event)
+	run.mu.Lock()
+	if run.initialEventStatus == "" {
+		switch {
+		case err != nil:
+			run.initialEventStatus = "malformed_json"
+		case event.Type == "thread.started" && event.ThreadID == "":
+			run.initialEventStatus = "thread_started_missing_id"
+		case event.Type == "thread.started":
+			run.initialEventStatus = "thread_started"
+		default:
+			run.initialEventStatus = "unexpected_event"
+		}
+	}
+	if err != nil || event.Type != "thread.started" || event.ThreadID == "" {
+		run.mu.Unlock()
 		return
 	}
-	run.mu.Lock()
 	run.threadID = event.ThreadID
 	run.ref.NativeProviderSessionID = event.ThreadID
 	run.mu.Unlock()
@@ -428,6 +568,7 @@ func (p *Provider) emit(run *processRun, eventType domain.AgentEventType, payloa
 		Type:      eventType,
 		Timestamp: stamp,
 		Payload:   payload,
+		Terminal:  eventType == EventProcessComplete || eventType == EventProcessFailed || eventType == EventProcessStopped,
 	}
 	if err := event.Validate(); err != nil {
 		p.addRunError(run, err)

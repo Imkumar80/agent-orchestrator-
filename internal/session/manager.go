@@ -187,7 +187,43 @@ func (m *Manager) StartWithContext(ctx context.Context, id domain.SessionID, tas
 		}
 		return starting, errors.Join(err, fmt.Errorf("clean up unpersisted provider session: %w", cleanupErr))
 	}
+	if waiter, ok := provider.(ports.AgentExecutionWaiter); ok {
+		go m.observeExecution(ctx, waiter, ref)
+	}
 	return running, nil
+}
+
+// observeExecution persists a provider's exit outcome without depending on
+// provider-specific event names or payloads. Providers without the optional
+// waiter capability retain the existing lifecycle behavior.
+func (m *Manager) observeExecution(ctx context.Context, waiter ports.AgentExecutionWaiter, ref ports.SessionRef) {
+	err := waiter.Wait(ctx, ref)
+	if ctx.Err() != nil {
+		return
+	}
+	unlock, lockErr := m.locks.acquire(ctx, ref.SessionID)
+	if lockErr != nil {
+		return
+	}
+	defer unlock()
+	current, getErr := m.get(ctx, ref.SessionID)
+	if getErr != nil || current.Status.Terminal() {
+		return
+	}
+	next := domain.SessionCompleted
+	var failure *domain.ErrorInfo
+	if errors.Is(err, context.Canceled) {
+		next = domain.SessionInterrupted
+	} else if err != nil {
+		next = domain.SessionFailed
+		failure = &domain.ErrorInfo{Code: "provider_execution_failed", Message: "provider execution exited with an error; inspect the session events for details"}
+	}
+	if _, transitionErr := m.lifecycle.transitionLocked(ctx, current, next, failure, nil); transitionErr != nil {
+		// The session can become terminal through a concurrent interrupt/close.
+		// A failed persistence attempt is observable by the repository and leaves
+		// recovery to reconcile the still-nonterminal persisted state.
+		return
+	}
 }
 
 // Get retrieves a validated session snapshot.

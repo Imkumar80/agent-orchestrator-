@@ -41,12 +41,13 @@ func (s SessionStatus) Terminal() bool {
 	}
 }
 
+// This is the central representation of an execution session
 // Session is the durable, provider-independent identity for one task run.
 type Session struct {
-	ID                      SessionID     `json:"id"`
+	ID                      SessionID     `json:"id"` //orchestrator id of session
 	TaskID                  TaskID        `json:"task_id"`
 	Provider                AgentProvider `json:"provider"`
-	NativeProviderSessionID string        `json:"native_provider_session_id,omitempty"`
+	NativeProviderSessionID string        `json:"native_provider_session_id,omitempty"` //id aassigned by the actuall agent provider
 	Status                  SessionStatus `json:"status"`
 	CreatedAt               time.Time     `json:"created_at"`
 	UpdatedAt               time.Time     `json:"updated_at"`

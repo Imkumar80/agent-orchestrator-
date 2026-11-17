@@ -236,6 +236,84 @@ func TestCreateAndStartSession(t *testing.T) {
 	}
 }
 
+type waitAwareProvider struct {
+	*mockAgentProvider
+	results chan error
+}
+
+func (p *waitAwareProvider) Wait(ctx context.Context, _ ports.SessionRef) error {
+	select {
+	case err := <-p.results:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type notifyingSessionRepository struct {
+	*memorySessionRepository
+	updates chan domain.Session
+}
+
+func (r *notifyingSessionRepository) Update(ctx context.Context, value domain.Session) error {
+	if err := r.memorySessionRepository.Update(ctx, value); err != nil {
+		return err
+	}
+	r.updates <- value
+	return nil
+}
+
+func TestOptionalExecutionWaiterPersistsTerminalState(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		result    error
+		want      domain.SessionStatus
+		wantError string
+	}{
+		{name: "normal completion", want: domain.SessionCompleted},
+		{name: "cancellation", result: context.Canceled, want: domain.SessionInterrupted},
+		{name: "process failure", result: errors.New("exit code 9"), want: domain.SessionFailed, wantError: "provider_execution_failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := &notifyingSessionRepository{memorySessionRepository: newMemorySessionRepository(), updates: make(chan domain.Session, 4)}
+			provider := &waitAwareProvider{mockAgentProvider: &mockAgentProvider{name: domain.ProviderCodex, capabilities: domain.AgentCapabilities{Interruption: true}}, results: make(chan error, 1)}
+			registry := providers.NewRegistry()
+			if err := registry.Register(provider); err != nil {
+				t.Fatal(err)
+			}
+			manager, err := NewManager(repository, registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started, err := manager.CreateAndStart(context.Background(), testTask(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if started.Status != domain.SessionRunning {
+				t.Fatalf("start status=%s", started.Status)
+			}
+			provider.results <- test.result
+			deadline := time.After(3 * time.Second)
+			for {
+				select {
+				case updated := <-repository.updates:
+					if updated.Status.Terminal() {
+						if updated.Status != test.want {
+							t.Fatalf("terminal status=%s want=%s", updated.Status, test.want)
+						}
+						if test.wantError != "" && (updated.Error == nil || updated.Error.Code != test.wantError) {
+							t.Fatalf("failure info=%#v", updated.Error)
+						}
+						return
+					}
+				case <-deadline:
+					t.Fatalf("session did not reach terminal state %s", test.want)
+				}
+			}
+		})
+	}
+}
+
 func TestCreateAndStartMissingProvider(t *testing.T) {
 	repository := newMemorySessionRepository()
 	manager, err := NewManager(repository, providers.NewRegistry())

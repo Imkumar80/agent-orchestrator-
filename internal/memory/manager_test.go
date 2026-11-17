@@ -40,6 +40,9 @@ func (r *memoryRepoFake) UpdateMemory(_ context.Context, m domain.Memory) error 
 	return nil
 }
 func (r *memoryRepoFake) SearchMemories(_ context.Context, q domain.MemorySearchQuery) ([]domain.Memory, error) {
+	if err := q.Validate(); err != nil {
+		return nil, err
+	}
 	out := make([]domain.Memory, 0)
 	for _, m := range r.values {
 		if m.ArchivedAt != nil || (m.ExpiresAt != nil && !m.ExpiresAt.After(q.At)) {

@@ -107,6 +107,7 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 	session, err := h.coordinator.Execute(h.execContext, task)
 	if err != nil {
 		if session.ID != "" && session.Status == domain.SessionFailed && !errors.Is(err, providers.ErrProviderNotFound) {
+			h.logProviderStartupFailure(task, session, err)
 			writeJSON(w, http.StatusBadGateway, errorEnvelope{Error: apiError{
 				Code: "provider_start_failed", Message: "The provider failed to start the task.", SessionID: string(session.ID),
 			}})
@@ -116,6 +117,36 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, taskResponse{Accepted: true, Session: session})
+}
+
+func (h *Handler) logProviderStartupFailure(task domain.Task, session domain.Session, err error) {
+	if h.logger == nil {
+		return
+	}
+	attrs := []any{"task_id", task.ID, "session_id", session.ID, "provider", task.Provider}
+	var diagnostic *ports.ProviderStartupError
+	if errors.As(err, &diagnostic) {
+		attrs = append(attrs,
+			"startup_stage", diagnostic.Stage,
+			"diagnostic_category", diagnostic.Category,
+			"process_created", diagnostic.ProcessCreated,
+			"thread_started", diagnostic.ThreadStarted,
+		)
+		if diagnostic.ExitCode != nil {
+			attrs = append(attrs, "process_exit_code", *diagnostic.ExitCode)
+		}
+		if diagnostic.OSErrorSummary != "" {
+			attrs = append(attrs, "os_error", diagnostic.OSErrorSummary)
+		}
+	} else {
+		attrs = append(attrs,
+			"startup_stage", "unknown",
+			"diagnostic_category", "unclassified",
+			"process_created", false,
+			"thread_started", false,
+		)
+	}
+	h.logger.Error("provider startup failed", attrs...)
 }
 
 type sessionResponse struct {
@@ -255,6 +286,9 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := writeSSE(w, flusher, event); err != nil {
 				h.logger.Debug("SSE client disconnected", "session_id", sessionID, "error", err)
+				return
+			}
+			if event.Terminal {
 				return
 			}
 		}

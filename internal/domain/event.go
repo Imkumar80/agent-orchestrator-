@@ -17,6 +17,7 @@ type AgentEvent struct {
 	Type      AgentEventType  `json:"type"`
 	Timestamp time.Time       `json:"timestamp"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
+	Terminal  bool            `json:"terminal,omitempty"`
 }
 
 // Validate checks required event metadata and JSON payload validity.

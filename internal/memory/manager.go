@@ -26,7 +26,7 @@ var (
 
 const (
 	defaultLimit  = 10
-	maxCandidates = 1000
+	maxCandidates = 100
 )
 
 type Config struct {

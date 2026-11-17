@@ -14,6 +14,7 @@ import (
 
 	"github.com/Imkumar80/agent-orchestrator-/internal/app"
 	"github.com/Imkumar80/agent-orchestrator-/internal/cli/client"
+	"github.com/Imkumar80/agent-orchestrator-/internal/cli/tui"
 	"github.com/Imkumar80/agent-orchestrator-/internal/domain"
 )
 
@@ -22,6 +23,7 @@ const Version = "0.1.0"
 type Runner struct {
 	Out, Err  io.Writer
 	LookupEnv func(string) (string, bool)
+	runServer func(context.Context) error
 }
 
 func (r Runner) Run(ctx context.Context, args []string) error {
@@ -57,7 +59,7 @@ func (r Runner) Run(ctx context.Context, args []string) error {
 		return nil
 	}
 	if args[0] == "serve" {
-		return app.Run(ctx)
+		return r.serve(ctx, args[1:])
 	}
 	apiClient, err := client.New(server)
 	if err != nil {
@@ -74,10 +76,37 @@ func (r Runner) Run(ctx context.Context, args []string) error {
 		return r.memory(ctx, apiClient, args[1:])
 	case "doctor":
 		return r.doctor(ctx, apiClient)
+	case "tui":
+		if len(args) != 1 {
+			return errors.New("usage: agent-orchestrator tui")
+		}
+		return tui.Run(ctx, apiClient, server, Version)
 	default:
 		r.printHelp()
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func (r Runner) serve(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(r.Err)
+	fs.Usage = func() {
+		fmt.Fprintln(r.Out, "Usage: agent-orchestrator serve")
+		fmt.Fprintln(r.Out, "Start the orchestration HTTP server.")
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected serve argument %q", fs.Arg(0))
+	}
+	if r.runServer != nil {
+		return r.runServer(ctx)
+	}
+	return app.Run(ctx)
 }
 
 func (r Runner) printHelp() {
@@ -99,6 +128,7 @@ Commands:
   memory archive <memory_id>    Archive a memory
   memory delete <memory_id>     Delete a memory explicitly
   doctor                        Check server reachability
+  tui                           Open the interactive terminal dashboard
   version                       Show CLI version
 
 Server URL: --server URL or ORCHESTRATOR_SERVER_URL (default http://127.0.0.1:8080)

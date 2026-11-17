@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -112,6 +113,87 @@ func TestCreateTaskProviderAndStartupFailures(t *testing.T) {
 	}
 	if body.Error.Code != "provider_start_failed" || body.Error.SessionID != "ses-failed" || strings.Contains(response.Body.String(), "secret details") {
 		t.Fatalf("startup error response = %s", response.Body)
+	}
+}
+
+func TestCreateTaskLogsSanitizedProviderStartupDiagnostic(t *testing.T) {
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+	handler, coordinator, _, _ := newTestHandlerWithLogger(t, logger)
+	coordinator.session = domain.Session{ID: "ses-diagnostic", Status: domain.SessionFailed}
+	coordinator.err = errors.Join(
+		errors.New("PROMPT_SENTINEL CREDENTIAL_SENTINEL RAW_STDERR_SENTINEL"),
+		&ports.ProviderStartupError{
+			Stage: "process_start", Category: "process_creation_failed",
+			ProcessCreated: false, ThreadStarted: false, OSErrorSummary: "Access is denied",
+		},
+	)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, taskRequest(t, map[string]any{
+		"id": "task-diagnostic", "description": "PROMPT_SENTINEL task text", "provider": "codex",
+		"working_directory": filepath.Clean(t.TempDir()),
+	}))
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusBadGateway, response.Body)
+	}
+	var body errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Code != "provider_start_failed" || body.Error.Message != "The provider failed to start the task." || body.Error.SessionID != "ses-diagnostic" {
+		t.Fatalf("HTTP startup error changed: %#v", body.Error)
+	}
+	for _, secret := range []string{"PROMPT_SENTINEL", "CREDENTIAL_SENTINEL", "RAW_STDERR_SENTINEL"} {
+		if strings.Contains(response.Body.String(), secret) || strings.Contains(logOutput.String(), secret) {
+			t.Fatalf("sensitive sentinel %q appeared in response or logs", secret)
+		}
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logOutput.Bytes()), &record); err != nil {
+		t.Fatalf("unmarshal structured diagnostic log: %v; log=%q", err, logOutput.String())
+	}
+	wantFields := map[string]any{
+		"msg": "provider startup failed", "task_id": "task-diagnostic", "session_id": "ses-diagnostic", "provider": "codex",
+		"startup_stage": "process_start", "diagnostic_category": "process_creation_failed",
+		"process_created": false, "thread_started": false, "os_error": "Access is denied",
+	}
+	for key, want := range wantFields {
+		if got := record[key]; got != want {
+			t.Errorf("log field %q = %#v, want %#v", key, got, want)
+		}
+	}
+	if _, exists := record["process_exit_code"]; exists {
+		t.Fatalf("log unexpectedly included an unavailable process exit code: %#v", record)
+	}
+}
+
+func TestCreateTaskLogsWrappedStartupErrorAndKeepsResponseGeneric(t *testing.T) {
+	var logOutput bytes.Buffer
+	handler, coordinator, _, _ := newTestHandlerWithLogger(t, slog.New(slog.NewJSONHandler(&logOutput, nil)))
+	coordinator.session = domain.Session{ID: "ses-wrapped", Status: domain.SessionFailed}
+	exitCode := 7
+	diagnostic := &ports.ProviderStartupError{
+		Stage: "await_thread_started", Category: "process_exited_before_thread_started",
+		ProcessCreated: true, ThreadStarted: false, ExitCode: &exitCode,
+		Cause: errors.New("private diagnostic cause"),
+	}
+	coordinator.err = errors.Join(errors.New("wrapper detail"), diagnostic)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, taskRequest(t, validTaskInput(t)))
+	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "private diagnostic cause") {
+		t.Fatalf("HTTP response = %d %s", response.Code, response.Body)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logOutput.Bytes()), &record); err != nil {
+		t.Fatalf("unmarshal structured log: %v; log=%q", err, logOutput.String())
+	}
+	if record["diagnostic_category"] != "process_exited_before_thread_started" || record["process_exit_code"] != float64(7) || record["process_created"] != true {
+		t.Fatalf("wrapped startup diagnostic not logged: %#v", record)
+	}
+	if strings.Contains(logOutput.String(), "private diagnostic cause") || strings.Contains(logOutput.String(), "wrapper detail") {
+		t.Fatalf("raw wrapped error was logged: %s", logOutput.String())
 	}
 }
 

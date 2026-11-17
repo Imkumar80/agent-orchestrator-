@@ -21,7 +21,7 @@ func TestHelpVersionAndServerURLConfiguration(t *testing.T) {
 		}
 		return "", false
 	}}
-	if err := r.Run(context.Background(), nil); err != nil || !strings.Contains(out.String(), "session logs") {
+	if err := r.Run(context.Background(), nil); err != nil || !strings.Contains(out.String(), "session logs") || !strings.Contains(out.String(), "tui") {
 		t.Fatalf("help = %q, %v", out.String(), err)
 	}
 	out.Reset()
@@ -31,6 +31,44 @@ func TestHelpVersionAndServerURLConfiguration(t *testing.T) {
 	out.Reset()
 	if err := r.Run(context.Background(), []string{"doctor"}); err == nil || !strings.Contains(err.Error(), "example.invalid") {
 		t.Fatalf("doctor should use environment URL, got %v", err)
+	}
+}
+
+func TestServeHelpDoesNotStartServer(t *testing.T) {
+	for _, helpArg := range []string{"--help", "-h"} {
+		t.Run(helpArg, func(t *testing.T) {
+			var out strings.Builder
+			started := false
+			r := Runner{
+				Out: &out, Err: io.Discard,
+				runServer: func(context.Context) error { started = true; return nil },
+			}
+			if err := r.Run(context.Background(), []string{"serve", helpArg}); err != nil {
+				t.Fatalf("serve help error = %v", err)
+			}
+			if started {
+				t.Fatal("serve help invoked server startup")
+			}
+			if !strings.Contains(out.String(), "Usage: agent-orchestrator serve") {
+				t.Fatalf("serve help output = %q", out.String())
+			}
+		})
+	}
+}
+
+func TestServeWithoutHelpInvokesServer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := false
+	r := Runner{runServer: func(got context.Context) error {
+		called = got == ctx
+		return nil
+	}}
+	if err := r.Run(ctx, []string{"serve"}); err != nil {
+		t.Fatalf("serve error = %v", err)
+	}
+	if !called {
+		t.Fatal("normal serve did not invoke server startup with its context")
 	}
 }
 
