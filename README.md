@@ -223,6 +223,7 @@ More details:
 - [Interactive dashboard](docs/interactive-tui.md)
 - [Memory guide](docs/memory.md)
 - [Codex integration verification](docs/codex-integration.md)
+- [Codex runtime audit and verification limits](docs/codex-runtime-audit.md)
 - [Recovery behavior](docs/recovery.md)
 - [Architecture specification](SKILL.md)
 - [Architecture decisions](docs/decisions/README.md)

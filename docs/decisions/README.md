@@ -17,6 +17,7 @@ or `SKILL.md`, which remains the primary architectural specification.
 | [0005](0005-use-bounded-in-memory-session-event-broadcasting.md) | Use bounded in-memory session event broadcasting | Accepted |
 | [0006](0006-keep-the-cli-on-the-http-api.md) | Keep the CLI on the HTTP API | Accepted |
 | [0007](0007-use-provider-independent-sqlite-memory.md) | Use provider-independent SQLite memory | Accepted |
+| [0008](0008-separate-execution-outcomes-from-process-cleanup.md) | Separate execution outcomes from process cleanup | Accepted |
 
 ## When to write an ADR
 
